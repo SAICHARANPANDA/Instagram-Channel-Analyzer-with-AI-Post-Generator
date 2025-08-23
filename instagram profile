@@ -1,0 +1,230 @@
+import os, json
+from pathlib import Path
+
+root = Path("/mnt/data/instagram_fastapi_phase1")
+backend = root / "backend"
+data_dir = root / "data"
+backend.mkdir(parents=True, exist_ok=True)
+data_dir.mkdir(parents=True, exist_ok=True)
+
+(backend / "__init__.py").write_text("", encoding="utf-8")
+
+requirements_txt = """\
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+httpx>=0.27.0
+pydantic>=2.7.0
+python-dotenv>=1.0.1
+"""
+(root / "requirements.txt").write_text(requirements_txt, encoding="utf-8")
+
+main_py = """\
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from typing import Dict
+from pathlib import Path
+import os, time
+from .models import CollectRequest, CollectResponse, DataPayload, SummaryMetrics
+from .utils import safe_write_json
+from .ai import fetch_instagram_data, BASE_DIR
+
+app = FastAPI(title="Instagram Data Collector", version="1.0.0")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
+METRICS: Dict[str, int] = {"total_requests": 0, "collect_ok": 0, "collect_fail": 0}
+LAST_REQUEST_TS: float = 0.0
+
+@app.middleware("http")
+async def count_requests(request, call_next):
+    global LAST_REQUEST_TS
+    METRICS["total_requests"] += 1
+    LAST_REQUEST_TS = time.time()
+    response = await call_next(request)
+    return response
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "service": "instagram-data-collector", "time": int(time.time())}
+
+@app.get("/metrics")
+def metrics():
+    return {**METRICS, "last_request_unix": int(LAST_REQUEST_TS) if LAST_REQUEST_TS else None}
+
+@app.post("/collect-data", response_model=CollectResponse)
+def collect_data(req: CollectRequest):
+    try:
+        payload: DataPayload = fetch_instagram_data(channel_name=req.channel_name, max_posts=req.max_posts)
+        out_path = BASE_DIR / "data" / "channel_data.json"
+        os.makedirs(out_path.parent, exist_ok=True)
+        safe_write_json(out_path, payload.model_dump())
+        METRICS["collect_ok"] += 1
+        return CollectResponse(message="Data collected successfully", data=payload)
+    except Exception as e:
+        METRICS["collect_fail"] += 1
+        raise HTTPException(status_code=500, detail=str(e))
+"""
+(backend / "main.py").write_text(main_py, encoding="utf-8")
+
+models_py = """\
+from pydantic import BaseModel, Field
+from typing import List, Optional
+
+class CollectRequest(BaseModel):
+    channel_name: str = Field(..., description="Instagram username or placeholder name for mock")
+    max_posts: int = Field(10, ge=1, le=50, description="Max number of posts to fetch")
+
+class MediaItem(BaseModel):
+    id: str
+    caption: Optional[str] = None
+    like_count: Optional[int] = None
+    comments_count: Optional[int] = None
+    timestamp: Optional[str] = None
+    permalink: Optional[str] = None
+    media_type: Optional[str] = None
+    media_url: Optional[str] = None
+
+class Profile(BaseModel):
+    id: Optional[str] = None
+    username: str
+    followers: Optional[int] = None
+    following: Optional[int] = None
+
+class SummaryMetrics(BaseModel):
+    total_posts: int
+    total_likes: int
+    total_comments: int
+    avg_likes: float
+    avg_comments: float
+    engagement_rate: Optional[float] = None
+
+class DataPayload(BaseModel):
+    profile: Profile
+    posts: List[MediaItem]
+    metrics: SummaryMetrics
+
+class CollectResponse(BaseModel):
+    message: str
+    data: DataPayload
+"""
+(backend / "models.py").write_text(models_py, encoding="utf-8")
+
+utils_py = """\
+import json, time
+from pathlib import Path
+from typing import Any, Callable
+
+def safe_read_json(path: Path) -> dict:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        print(f"[safe_read_json] Error: {e}")
+        return {}
+
+def safe_write_json(path: Path, data: dict) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"[safe_write_json] Error: {e}")
+        raise
+
+def retry(func: Callable, *args: Any, attempts: int = 3, backoff_seconds: float = 0.5, **kwargs: Any):
+    last_exc = None
+    for i in range(attempts):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            last_exc = e
+            if i < attempts - 1:
+                time.sleep(backoff_seconds * (2 ** i))
+    raise last_exc
+"""
+(backend / "utils.py").write_text(utils_py, encoding="utf-8")
+
+ai_py = """\
+import os
+from pathlib import Path
+from typing import List
+import httpx
+from dotenv import load_dotenv
+from .models import DataPayload, Profile, MediaItem, SummaryMetrics
+from .utils import safe_read_json, retry
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(BASE_DIR / ".env")
+
+IG_TOKEN = os.getenv("IG_TOKEN", "").strip()
+IG_USER_ID = os.getenv("IG_USER_ID", "").strip()
+
+def _has_valid_tokens() -> bool:
+    return bool(IG_TOKEN and IG_USER_ID)
+
+def _example_json_path() -> Path:
+    return BASE_DIR / "example_channel.json"
+
+def _compute_metrics(posts: List[MediaItem], followers: int | None) -> SummaryMetrics:
+    total_likes = sum([p.like_count or 0 for p in posts])
+    total_comments = sum([p.comments_count or 0 for p in posts])
+    n = len(posts) if posts else 1
+    avg_likes = round(total_likes / n, 2)
+    avg_comments = round(total_comments / n, 2)
+    engagement_rate = None
+    if followers and followers > 0:
+        engagement_rate = round((total_likes + total_comments) / followers, 4)
+    return SummaryMetrics(total_posts=len(posts), total_likes=total_likes, total_comments=total_comments, avg_likes=avg_likes, avg_comments=avg_comments, engagement_rate=engagement_rate)
+
+def _fetch_from_graph_api(max_posts: int) -> DataPayload:
+    fields = "id,username,media.limit({}){{id,caption,media_type,media_url,permalink,timestamp,thumbnail_url,like_count,comments_count}}".format(max_posts)
+    url = f"https://graph.instagram.com/{IG_USER_ID}"
+    params = {"fields": fields, "access_token": IG_TOKEN}
+    def _do_request():
+        with httpx.Client(timeout=30) as client:
+            resp = client.get(url, params=params)
+            resp.raise_for_status()
+            return resp.json()
+    data = retry(_do_request, attempts=3, backoff_seconds=0.6)
+    username = data.get("username", "unknown")
+    user_id = data.get("id", None)
+    media = data.get("media", {}).get("data", [])
+    posts: List[MediaItem] = [MediaItem(id=str(m.get("id")), caption=m.get("caption"), like_count=m.get("like_count"), comments_count=m.get("comments_count"), timestamp=m.get("timestamp"), permalink=m.get("permalink"), media_type=m.get("media_type"), media_url=m.get("media_url")) for m in media]
+    profile = Profile(id=str(user_id) if user_id else None, username=username, followers=None, following=None)
+    metrics = _compute_metrics(posts, followers=profile.followers or None)
+    return DataPayload(profile=profile, posts=posts, metrics=metrics)
+
+def _fetch_from_example() -> DataPayload:
+    example = safe_read_json(_example_json_path())
+    profile_data = example.get("profile", {})
+    posts_data = example.get("posts", [])
+    profile = Profile(id=str(profile_data.get("id")) if profile_data.get("id") else None, username=profile_data.get("username", "example_channel"), followers=profile_data.get("followers"), following=profile_data.get("following"))
+    posts: List[MediaItem] = [MediaItem(id=str(p.get("id")), caption=p.get("caption"), like_count=p.get("likes") or p.get("like_count"), comments_count=p.get("comments") or p.get("comments_count"), timestamp=p.get("timestamp"), permalink=p.get("permalink"), media_type=p.get("media_type"), media_url=p.get("media_url")) for p in posts_data]
+    metrics = _compute_metrics(posts, followers=profile.followers)
+    return DataPayload(profile=profile, posts=posts, metrics=metrics)
+
+def fetch_instagram_data(channel_name: str, max_posts: int = 10) -> DataPayload:
+    if _has_valid_tokens():
+        try:
+            return _fetch_from_graph_api(max_posts=max_posts)
+        except Exception:
+            pass
+    return _fetch_from_example()
+"""
+(backend / "ai.py").write_text(ai_py, encoding="utf-8")
+
+example_json = {
+    "profile": {"id": "CHARAN_1319", "username": "mr_cherry", "followers": 3421, "following": 128},
+    "posts": [
+        {"id": "p1", "caption": "Hello Instagram 👋 First post!", "likes": 120, "comments": 8, "timestamp": "2025-08-01T09:15:00Z", "permalink": "https://instagram.com/p/p1", "media_type": "IMAGE", "media_url":"https://content/charan1.jpg"},
+        {"id": "p2", "caption": "Coffee + code = ❤️ #devlife", "likes": 265, "comments": 22, "timestamp": "2025-08-03T18:30:00Z", "permalink": "https://instagram.com/p/p2", "media_type": "IMAGE", "media_url": "https://content/CHERRY1.jpg"},
+             ]
+}
+(root / "example_channel.json").write_text(json.dumps(example_json, indent=2), encoding="utf-8")
+
+env_example = "IG_TOKEN=your_instagram_graph_api_token_here\nIG_USER_ID=your_ig_business_or_creator_user_id_here\n"
+(root / ".env.example").write_text(env_example, encoding="utf-8")
+
+readme_md = "# Instagram FastAPI Collector — Phase 1\n"
+(root / "README.md").write_text(readme_md, encoding="utf-8")
