@@ -1,0 +1,20 @@
+{
+  "profile": {
+    "username": "fitness_guru",
+    "followers": 1200
+  },
+  "posts": [
+    {
+      "id": 1,
+      "caption": "Morning workout!",
+      "likes": 150,
+      "comments": 10
+    },
+    {
+      "id": 2,
+      "caption": "Protein shake recipe",
+      "likes": 200,
+      "comments": 20
+    }
+  ]
+}
