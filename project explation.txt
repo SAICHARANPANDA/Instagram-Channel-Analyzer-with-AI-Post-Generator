@@ -1,0 +1,50 @@
+Phase 1 (Backend Scaffolding & Data Collection)
+
+Setup FastAPI backend (backend/main.py, models.py, utils.py, ai.py).
+
+Endpoints:
+
+POST /collect-data → Save Instagram data as JSON.
+
+GET /health → Check API status.
+
+GET /metrics → Track requests & latency.
+
+JSON helpers with error handling.
+
+Mock Instagram Graph API client.
+
+Data stored in data/channel_data.json.
+
+Phase 2 (Summaries & AI Recommendations)
+
+AI-powered features added:
+
+GET /summarize → Reads JSON, computes analytics, generates performance summary via AI.
+
+GET /recommend → Suggests caption, hashtags, justification for next post.
+
+ai.py → Abstraction for text generation (supports OpenAI, Gemini, HuggingFace).
+
+Added Pydantic validation for safe responses.
+
+Extended metrics with per-endpoint counters & latency.
+
+Added unit tests.
+
+Phase 3 (AI Thumbnail & Frontend with Streamlit)
+
+Backend:
+
+POST /generate-thumbnail → Creates AI-generated 1080×1080 thumbnail image.
+
+Frontend (frontend/app.py with Streamlit):
+
+Calls backend REST API endpoints.
+
+UI for uploading data, generating summary, recommendations, and thumbnails.
+
+Shows error messages, loading states, validation.
+
+README with setup instructions.
+
